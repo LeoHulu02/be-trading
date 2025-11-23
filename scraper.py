@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Optional
 from urllib.parse import urljoin, urlparse
 from io import StringIO
 from datetime import datetime, timedelta
+import hashlib
 
 import requests
 from bs4 import BeautifulSoup
@@ -572,6 +573,53 @@ class SignalSahamScraper:
         logging.info("Saved CSV to %s", csv_path)
         logging.info("Saved JSON to %s", json_path)
 
+    def _fingerprint_path(self, symbol: str) -> str:
+        outdir = os.path.join("data", "stock_price", symbol)
+        os.makedirs(outdir, exist_ok=True)
+        return os.path.join(outdir, ".fingerprint")
+
+    def _compute_fingerprint(self, df: pd.DataFrame) -> str:
+        try:
+            cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume", "Value", "symbol"] if c in df.columns]
+            use = df[cols].copy() if cols else df.copy()
+        except Exception:
+            use = df.copy()
+        try:
+            if "Date" in use.columns:
+                use["Date_parsed"] = pd.to_datetime(use["Date"], errors="coerce")
+                use = use.sort_values(by=["Date_parsed", "Date"], ascending=[False, False])
+                use = use.drop(columns=["Date_parsed"])
+        except Exception:
+            pass
+        try:
+            limited = use.head(200)
+        except Exception:
+            limited = use
+        try:
+            payload = json.dumps(json.loads(limited.to_json(orient="records")), ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            payload = str(limited.values.tolist())
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _load_fingerprint(self, symbol: str) -> Optional[str]:
+        p = self._fingerprint_path(symbol)
+        try:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    t = f.read().strip()
+                    return t or None
+        except Exception:
+            return None
+        return None
+
+    def _save_fingerprint(self, symbol: str, fp: str) -> None:
+        p = self._fingerprint_path(symbol)
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(fp)
+        except Exception:
+            pass
+
     def start_driver(self):
         if not self.use_selenium:
             return None
@@ -765,6 +813,28 @@ class SignalSahamScraper:
                 df = self._table_to_dataframe(t)
                 if df is not None and not df.empty:
                     dfs.append(df)
+        if not dfs:
+            endpoints = self.discover_data_endpoints(html)
+            for u in endpoints:
+                obj = self._fetch_json(u, referer=url)
+                if obj is None:
+                    continue
+                try:
+                    if isinstance(obj, list):
+                        dfj = pd.DataFrame(obj)
+                    elif isinstance(obj, dict):
+                        if isinstance(obj.get("data"), list):
+                            dfj = pd.DataFrame(obj.get("data"))
+                        elif isinstance(obj.get("rows"), list):
+                            dfj = pd.DataFrame(obj.get("rows"))
+                        else:
+                            dfj = pd.DataFrame([obj])
+                    else:
+                        dfj = pd.DataFrame()
+                except Exception:
+                    dfj = pd.DataFrame()
+                if dfj is not None and not dfj.empty:
+                    dfs.append(dfj)
         key_cols = ["Date", "Open", "High", "Low", "Close", "Volume", "Value"]
         chosen = None
         for df in dfs:
@@ -784,6 +854,9 @@ class SignalSahamScraper:
         os.makedirs(outdir, exist_ok=True)
         csv_path = os.path.join(outdir, f"{symbol}.csv")
         json_path = os.path.join(outdir, f"{symbol}.json")
+        if df is None or (hasattr(df, "empty") and df.empty):
+            print(f"❌ {symbol} tidak ada data")
+            return
         final_df = df.copy()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if update_mode and update_mode.lower() == "append" and os.path.exists(csv_path):
@@ -812,6 +885,13 @@ class SignalSahamScraper:
                     final_df = final_df.drop_duplicates(keep="first")
             except Exception:
                 pass
+        on_change_only = (os.environ.get("ON_CHANGE_ONLY") or "").strip().lower() in ("1", "true", "yes", "y")
+        fp_new = self._compute_fingerprint(final_df)
+        if on_change_only:
+            fp_old = self._load_fingerprint(symbol)
+            if fp_old and fp_old == fp_new:
+                print(f"⏭ {symbol} tidak berubah")
+                return
         try:
             final_df["updated_at"] = now_str
         except Exception:
@@ -819,6 +899,7 @@ class SignalSahamScraper:
         final_df.to_csv(csv_path, index=False, encoding="utf-8")
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(json.loads(final_df.to_json(orient="records")), f, ensure_ascii=False, indent=2)
+        self._save_fingerprint(symbol, fp_new)
 
     def scrape_symbols_from_file(self, file_path: str, limit: Optional[int] = None, skip_existing: bool = False, rate_limit_ms: int = 0, refresh_retry: bool = False, update_mode: str = "snapshot") -> Tuple[int, int]:
         try:

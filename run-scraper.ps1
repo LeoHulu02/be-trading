@@ -14,10 +14,11 @@ if (-not $env:SKIP_EXISTING) { $env:SKIP_EXISTING = 'false' }
 if (-not $env:REFRESH_RETRY) { $env:REFRESH_RETRY = 'true' }
 if (-not $env:RATE_LIMIT_MS) { $env:RATE_LIMIT_MS = '800' }
 if (-not $env:AGGREGATE_AFTER) { $env:AGGREGATE_AFTER = 'true' }
+if (-not $env:ON_CHANGE_ONLY) { $env:ON_CHANGE_ONLY = 'true' }
 
 Push-Location "d:\var\shm"
 try {
-  python "d:\var\shm\scraper.py"
+  python "d:\var\shm\backend\scraper.py"
 } finally {
   Pop-Location
 }
